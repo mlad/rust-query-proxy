@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	ProxyVersion         = 1                // Proxy-server version
+	ProxyVersion         = 2                // Proxy-server version
 	ProxyModeByteAddress = 0                // Mode: receive addresses as array of bytes
 	NetReadTimeout       = 10 * time.Second // Read timeout
 )
@@ -24,7 +24,7 @@ var cacheLock sync.Mutex
 func main() {
 	LoadConfig()
 
-	listener, err := net.Listen("tcp", cfg.Address)
+	listener, err := net.Listen("tcp", cfg.Bind)
 	if err != nil {
 		log.Fatalf("Listen error: %s\n", err)
 	}
@@ -44,7 +44,7 @@ func main() {
 		address := conn.RemoteAddr().String()
 		address = address[:strings.LastIndexByte(address, ':')]
 		found := false
-		for _, v := range cfg.Whitelist {
+		for _, v := range cfg.IpWhitelist {
 			if address == v {
 				found = true
 				break
@@ -128,7 +128,7 @@ func IncomingConnection(conn net.Conn) {
 	sp := make(chan struct{}, cfg.UpdateBurstLimit)
 
 	for _, v := range servers {
-		if now.Sub(v.UpdateTime) > cfg.ServerUpdateTime {
+		if now.Sub(v.UpdateTime) > cfg.QueryConnectTimeoutInSeconds*time.Second {
 			sp <- struct{}{}
 			wg.Add(1)
 			go v.UpdateInfoAsync(sp, wg)
@@ -152,7 +152,7 @@ func IncomingConnection(conn net.Conn) {
 
 func CleanupCache() {
 	for {
-		time.Sleep(cfg.ServerCacheTime)
+		time.Sleep(cfg.ServerCacheTimeInSeconds * time.Second)
 
 		cacheLock.Lock()
 
@@ -160,7 +160,7 @@ func CleanupCache() {
 		now := time.Now()
 
 		for k, v := range cache {
-			if now.Sub(v.UpdateTime) > cfg.ServerCacheTime {
+			if now.Sub(v.UpdateTime) > cfg.ServerCacheTimeInSeconds*time.Second {
 				old = append(old, k)
 			}
 		}

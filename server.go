@@ -4,28 +4,22 @@ import (
 	"bufio"
 	"encoding/binary"
 	"log"
-	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-const (
-	UpdateStatusOk = iota
-	UpdateStatusConnErr
-	UpdateStatusWriteErr
-)
-
 type RustServerInfo struct {
-	Address      string
-	Hostname     string
-	Map          string
-	MaxPlayers   int
-	Players      int
-	Wiped        int64
-	UpdateStatus byte
-	UpdateTime   time.Time
+	Address    string
+	Hostname   string
+	Map        string
+	MaxPlayers uint16
+	Players    uint16
+	Queue      uint16
+	Wiped      uint64
+	CustomTags string
+	UpdateTime time.Time
 }
 
 func (srv *RustServerInfo) WriteQueryProxy(writer *bufio.Writer) {
@@ -35,13 +29,19 @@ func (srv *RustServerInfo) WriteQueryProxy(writer *bufio.Writer) {
 	_, _ = writer.WriteString(srv.Map)
 	_ = writer.WriteByte(0)
 
-	_ = writer.WriteByte(byte(srv.Players >> 8))
-	_ = writer.WriteByte(byte(srv.Players & 0xFF))
+	// _ = writer.WriteByte(byte(srv.Players >> 8))
+	// _ = writer.WriteByte(byte(srv.Players & 0xFF))
+	//
+	// _ = writer.WriteByte(byte(srv.MaxPlayers >> 8))
+	// _ = writer.WriteByte(byte(srv.MaxPlayers & 0xFF))
 
-	_ = writer.WriteByte(byte(srv.MaxPlayers >> 8))
-	_ = writer.WriteByte(byte(srv.MaxPlayers & 0xFF))
-
+	_ = binary.Write(writer, binary.BigEndian, srv.Players)
+	_ = binary.Write(writer, binary.BigEndian, srv.MaxPlayers)
 	_ = binary.Write(writer, binary.BigEndian, srv.Wiped)
+	_ = binary.Write(writer, binary.BigEndian, srv.Queue)
+
+	_, _ = writer.WriteString(srv.CustomTags)
+	_ = writer.WriteByte(0)
 }
 
 func (srv *RustServerInfo) UpdateInfoAsync(sp <-chan struct{}, wg *sync.WaitGroup) {
@@ -51,76 +51,47 @@ func (srv *RustServerInfo) UpdateInfoAsync(sp <-chan struct{}, wg *sync.WaitGrou
 }
 
 func (srv *RustServerInfo) UpdateInfo() {
-	conn, err := net.DialTimeout("udp", srv.Address, cfg.QueryConnectTimeout)
+	data, err := QueryRustServer(srv.Address)
 	if err != nil {
-		log.Printf("UpdInf | %s | Dial: %s\n", srv.Address, err)
-		srv.UpdateStatus = UpdateStatusConnErr
+		log.Printf("QueryRustServer | %s | %s\n", srv.Address, err.Error())
 		return
 	}
 
-	_ = conn.SetDeadline(time.Now().Add(cfg.QueryConnectTimeout))
+	srv.Hostname = data.Hostname
+	srv.Map = data.Map
 
-	_, err = conn.Write([]byte("\xFF\xFF\xFF\xFFTSource Engine Query\x00"))
-	if err != nil {
-		log.Printf("UpdInf | %s | Write: %s\n", srv.Address, err)
-		srv.UpdateStatus = UpdateStatusWriteErr
-		_ = conn.Close()
-		return
-	}
+	srv.MaxPlayers = 0
+	srv.Players = 0
+	srv.Queue = 0
+	srv.Wiped = 0
 
-	r := bufio.NewReader(conn)
-
-	_, _ = r.Discard(4 + 1 + 1)                     // header + protocol
-	srv.Hostname, _ = r.ReadString(0)               // name
-	srv.Map, _ = r.ReadString(0)                    // map
-	_, _ = r.ReadString(0)                          // folder
-	_, _ = r.ReadString(0)                          // game
-	_, _ = r.Discard(2 + 1 + 1 + 1 + 1 + 1 + 1 + 1) // app id + Players + MaxPlayers + Bots + Dedicated + Os + Password + Secure
-	_, _ = r.ReadString(0)
-
-	edf, _ := r.ReadByte()
-	if edf&0x80 != 0 {
-		_, _ = r.Discard(2) // Game port
-	}
-
-	if edf&0x10 != 0 {
-		_, _ = r.Discard(8) // SteamID
-	}
-
-	if edf&0x40 != 0 {
-		_, _ = r.Discard(2)    // SpecPort
-		_, _ = r.ReadString(0) // SpecName
-	}
-
-	if edf&0x20 != 0 {
-		keywords, _ := r.ReadString(0) // Keywords
-
-		for _, i := range strings.Split(keywords, ",") {
-			switch {
-			case strings.HasPrefix(i, "mp"):
-				srv.MaxPlayers, _ = strconv.Atoi(i[2:])
-			case strings.HasPrefix(i, "cp"):
-				srv.Players, _ = strconv.Atoi(i[2:])
-			case strings.HasPrefix(i, "born"):
-				srv.Wiped, _ = strconv.ParseInt(i[4:], 10, 64)
-			}
+	for _, v := range data.Tags {
+		switch {
+		case strings.HasPrefix(v, "mp"):
+			maxPlayers, _ := strconv.ParseUint(v[2:], 10, 16)
+			srv.MaxPlayers = uint16(maxPlayers)
+		case strings.HasPrefix(v, "cp"):
+			currentPlayers, _ := strconv.ParseUint(v[2:], 10, 16)
+			srv.Players = uint16(currentPlayers)
+		case strings.HasPrefix(v, "qp"):
+			queuedPlayers, _ := strconv.ParseUint(v[2:], 10, 16)
+			srv.Queue = uint16(queuedPlayers)
+		case strings.HasPrefix(v, "born"):
+			wipeTimestamp, _ := strconv.ParseUint(v[4:], 10, 64)
+			srv.Wiped = wipeTimestamp
 		}
 	}
 
-	if edf&0x01 != 0 {
-		_, _ = r.Discard(8) // GameID
+	customTags := make([]string, 0)
+	for _, tag := range data.Tags {
+		for _, v := range cfg.CustomTagsWhitelist {
+			if strings.EqualFold(tag, v) {
+				customTags = append(customTags, tag)
+				break
+			}
+		}
 	}
-
-	_ = conn.Close()
-
-	if srv.Hostname != "" {
-		srv.Hostname = srv.Hostname[:len(srv.Hostname)-1]
-	}
-
-	if srv.Map != "" {
-		srv.Map = srv.Map[:len(srv.Map)-1]
-	}
+	srv.CustomTags = strings.Join(customTags, ",")
 
 	srv.UpdateTime = time.Now()
-	srv.UpdateStatus = UpdateStatusOk
 }

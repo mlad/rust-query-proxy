@@ -8,12 +8,13 @@ import (
 )
 
 type Config struct {
-	Address             string        `json:"address"`               // Server address
-	Whitelist           []string      `json:"whitelist"`             // Whitelist for incoming connections
-	ServerUpdateTime    time.Duration `json:"server_update_time"`    // Time until next game-server update
-	ServerCacheTime     time.Duration `json:"server_cache_time"`     // Game-server cache time
-	QueryConnectTimeout time.Duration `json:"query_connect_timeout"` // Game-server connection timeout when updating data
-	UpdateBurstLimit    int           `json:"update_burst_limit"`    // Number of simultaneous updates
+	Bind                         string        // Server bind address
+	IpWhitelist                  []string      // Whitelist for incoming connections
+	QueryIntervalInSeconds       time.Duration // Time until next game-server update
+	ServerCacheTimeInSeconds     time.Duration // Game-server cache time
+	QueryConnectTimeoutInSeconds time.Duration // Game-server connection timeout when updating data
+	UpdateBurstLimit             int           // Number of simultaneous updates
+	CustomTagsWhitelist          []string      // Server custom tags whitelist
 }
 
 var cfg Config
@@ -22,12 +23,13 @@ func LoadConfig() {
 	file, err := os.Open("config.json")
 	if os.IsNotExist(err) {
 		cfg = Config{
-			Address:             "0.0.0.0:5050",
-			Whitelist:           []string{"127.0.0.1"},
-			ServerUpdateTime:    30 * time.Second,
-			ServerCacheTime:     time.Minute,
-			QueryConnectTimeout: 5 * time.Second,
-			UpdateBurstLimit:    5,
+			Bind:                         "0.0.0.0:5050",
+			IpWhitelist:                  []string{"127.0.0.1"},
+			QueryIntervalInSeconds:       30,
+			ServerCacheTimeInSeconds:     60,
+			QueryConnectTimeoutInSeconds: 5,
+			UpdateBurstLimit:             5,
+			CustomTagsWhitelist:          []string{"monthly", "biweekly", "weekly", "vanilla", "pve", "roleplay", "creative", "softcore", "minigame", "training", "battlefield", "broyale", "builds"},
 		}
 		SaveConfig()
 		return
