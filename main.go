@@ -6,30 +6,35 @@ import (
 	"io"
 	"log"
 	"net"
-	"strconv"
+	"rustQueryProxy/Config"
+	"rustQueryProxy/RustServer"
+	"rustQueryProxy/SourceQuery"
+	"rustQueryProxy/WebQuery"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	ProxyVersion         = 2                // Proxy-server version
+	ProxyVersionMin      = 1
+	ProxyVersionMax      = 2
 	ProxyModeByteAddress = 0                // Mode: receive addresses as array of bytes
 	NetReadTimeout       = 10 * time.Second // Read timeout
 )
 
-var cache = make(map[string]*RustServerInfo)
+var cache = make(map[string]*RustServer.Model)
 var cacheLock sync.Mutex
 
 func main() {
-	LoadConfig()
+	Config.Load()
+	WebQuery.LoadCache()
 
-	listener, err := net.Listen("tcp", cfg.Bind)
+	listener, err := net.Listen("tcp", Config.Bind)
 	if err != nil {
 		log.Fatalf("Listen error: %s\n", err)
 	}
 
-	go CleanupCache()
+	go CacheCleanupWorker()
 
 	log.Printf("Server started: %s\n", listener.Addr().String())
 
@@ -44,7 +49,7 @@ func main() {
 		address := conn.RemoteAddr().String()
 		address = address[:strings.LastIndexByte(address, ':')]
 		found := false
-		for _, v := range cfg.IpWhitelist {
+		for _, v := range Config.IpWhitelist {
 			if address == v {
 				found = true
 				break
@@ -73,40 +78,35 @@ func IncomingConnection(conn net.Conn) {
 
 	// Header: 0xFF + ver(2) + mode(1) + count(2)
 	if _, err = io.ReadFull(conn, buf); err != nil {
-		log.Printf("InConn | %s | Header read error: %s\n",
-			conn.RemoteAddr().String(), err)
+		log.Printf("InConn | %s | Header read error: %s\n", conn.RemoteAddr().String(), err)
 		return
 	}
 
 	if buf[0] != 0xFF {
-		log.Printf("InConn | %s | First byte error: 0x%X",
-			conn.RemoteAddr().String(), buf[0])
+		log.Printf("InConn | %s | First byte error: 0x%X", conn.RemoteAddr().String(), buf[0])
 		return
 	}
 
 	version := uint16(buf[1])<<8 | uint16(buf[2])
-	if version != ProxyVersion {
-		log.Printf("InConn | %s | Version error: %d (server: %d)\n",
-			conn.RemoteAddr().String(), version, ProxyVersion)
+	if version < ProxyVersionMin || version > ProxyVersionMax {
+		log.Printf("InConn | %s | Version error: %d (min: %d, max: %d)\n", conn.RemoteAddr().String(), version, ProxyVersionMin, ProxyVersionMax)
 		return
 	}
 
 	mode := buf[3]
 	if mode != ProxyModeByteAddress {
-		log.Printf("InConn | %s | Mode error: %d\n",
-			conn.RemoteAddr().String(), mode)
+		log.Printf("InConn | %s | Mode error: %d\n", conn.RemoteAddr().String(), mode)
 		return
 	}
 
 	count := uint16(buf[4])<<8 | uint16(buf[5])
 
-	servers := make([]*RustServerInfo, count)
+	servers := make([]*RustServer.Model, count)
 
 	for i := uint16(0); i < count; i++ {
 		// Address: ip(4) + port(2)
 		if _, err = io.ReadFull(conn, buf); err != nil {
-			log.Printf("InConn | %s | Address read error %d: %s\n",
-				conn.RemoteAddr().String(), i, err)
+			log.Printf("InConn | %s | Address read error %d: %s\n", conn.RemoteAddr().String(), i, err)
 			return
 		}
 
@@ -114,7 +114,7 @@ func IncomingConnection(conn net.Conn) {
 
 		srv, ok := cache[address]
 		if !ok {
-			srv = &RustServerInfo{Address: address}
+			srv = &RustServer.Model{Address: address}
 			cache[address] = srv
 		}
 
@@ -125,13 +125,17 @@ func IncomingConnection(conn net.Conn) {
 	now := time.Now()
 
 	wg := &sync.WaitGroup{}
-	sp := make(chan struct{}, cfg.UpdateBurstLimit)
+	sp := make(chan struct{}, Config.UpdateBurstLimit)
 
 	for _, v := range servers {
-		if now.Sub(v.UpdateTime) > cfg.QueryConnectTimeoutInSeconds*time.Second {
+		if now.Sub(v.UpdateTime) > Config.QueryConnectTimeout {
 			sp <- struct{}{}
 			wg.Add(1)
-			go v.UpdateInfoAsync(sp, wg)
+			go func(s *RustServer.Model) {
+				UpdateRustServer(s)
+				<-sp
+				wg.Done()
+			}(v)
 		}
 	}
 
@@ -141,7 +145,7 @@ func IncomingConnection(conn net.Conn) {
 		IpAddressToBytes(v.Address, buf)
 		_, _ = writer.Write(buf)
 
-		v.WriteQueryProxy(writer)
+		v.WriteToStream(writer, version)
 	}
 
 	if err = writer.Flush(); err != nil {
@@ -150,9 +154,28 @@ func IncomingConnection(conn net.Conn) {
 	}
 }
 
-func CleanupCache() {
+func UpdateRustServer(server *RustServer.Model) {
+	var data *RustServer.RawModel
+	var err error
+
+	if Config.SteamApiToken != "" {
+		data, _ = WebQuery.Query(server.Address)
+	}
+
+	if data == nil {
+		data, err = SourceQuery.Query(server.Address)
+		if err != nil {
+			log.Printf("Query | %s | %s\n", server.Address, err.Error())
+			return
+		}
+	}
+
+	server.Update(data)
+}
+
+func CacheCleanupWorker() {
 	for {
-		time.Sleep(cfg.ServerCacheTimeInSeconds * time.Second)
+		time.Sleep(Config.ServerCacheTime)
 
 		cacheLock.Lock()
 
@@ -160,7 +183,7 @@ func CleanupCache() {
 		now := time.Now()
 
 		for k, v := range cache {
-			if now.Sub(v.UpdateTime) > cfg.ServerCacheTimeInSeconds*time.Second {
+			if now.Sub(v.UpdateTime) > Config.ServerCacheTime {
 				old = append(old, k)
 			}
 		}
@@ -172,28 +195,5 @@ func CleanupCache() {
 		cacheLock.Unlock()
 
 		old = nil
-	}
-}
-
-func IpAddressToBytes(address string, buf []byte) {
-	bufPos := 0
-	addrPos := 0
-	var tmp uint64
-
-	for k, v := range address {
-		if v == '.' || v == ':' {
-			tmp, _ = strconv.ParseUint(address[addrPos:k], 10, 8)
-
-			buf[bufPos] = byte(tmp)
-			bufPos++
-			addrPos = k + 1
-
-			if v == ':' {
-				tmp, _ = strconv.ParseUint(address[k+1:], 10, 16)
-				buf[bufPos] = byte(tmp >> 8)
-				buf[bufPos+1] = byte(tmp & 0xFF)
-				break
-			}
-		}
 	}
 }

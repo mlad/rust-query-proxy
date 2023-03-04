@@ -1,22 +1,18 @@
-package main
+package SourceQuery
 
 import (
 	"bufio"
 	"errors"
 	"io"
 	"net"
+	"rustQueryProxy/Config"
+	"rustQueryProxy/RustServer"
 	"strings"
 	"time"
 )
 
-type RawRustServerModel struct {
-	Hostname string
-	Map      string
-	Tags     []string
-}
-
-func QueryRustServer(address string) (*RawRustServerModel, error) {
-	model := RawRustServerModel{}
+func Query(address string) (*RustServer.RawModel, error) {
+	model := RustServer.RawModel{}
 
 	challenge := make([]byte, 0)
 
@@ -25,12 +21,12 @@ func QueryRustServer(address string) (*RawRustServerModel, error) {
 	var err error
 
 	for {
-		conn, err = net.DialTimeout("udp", address, cfg.QueryConnectTimeoutInSeconds*time.Second)
+		conn, err = net.DialTimeout("udp", address, Config.QueryConnectTimeout)
 		if err != nil {
 			return nil, err
 		}
 
-		_ = conn.SetDeadline(time.Now().Add(cfg.QueryConnectTimeoutInSeconds * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(Config.QueryConnectTimeout))
 
 		_, err = conn.Write(append([]byte("\xFF\xFF\xFF\xFFTSource Engine Query\x00"), challenge...))
 		if err != nil {

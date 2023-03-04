@@ -1,16 +1,15 @@
-package main
+package RustServer
 
 import (
 	"bufio"
 	"encoding/binary"
-	"log"
+	"rustQueryProxy/Config"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
-type RustServerInfo struct {
+type Model struct {
 	Address    string
 	Hostname   string
 	Map        string
@@ -20,43 +19,36 @@ type RustServerInfo struct {
 	Wiped      uint64
 	CustomTags string
 	UpdateTime time.Time
+	QueryPort  uint16
 }
 
-func (srv *RustServerInfo) WriteQueryProxy(writer *bufio.Writer) {
+func (srv *Model) WriteToStream(writer *bufio.Writer, version uint16) {
 	_, _ = writer.WriteString(srv.Hostname)
 	_ = writer.WriteByte(0)
 
 	_, _ = writer.WriteString(srv.Map)
 	_ = writer.WriteByte(0)
 
-	// _ = writer.WriteByte(byte(srv.Players >> 8))
-	// _ = writer.WriteByte(byte(srv.Players & 0xFF))
-	//
-	// _ = writer.WriteByte(byte(srv.MaxPlayers >> 8))
-	// _ = writer.WriteByte(byte(srv.MaxPlayers & 0xFF))
+	if version == 1 {
+		_ = writer.WriteByte(byte(srv.Players >> 8))
+		_ = writer.WriteByte(byte(srv.Players & 0xFF))
 
-	_ = binary.Write(writer, binary.BigEndian, srv.Players)
-	_ = binary.Write(writer, binary.BigEndian, srv.MaxPlayers)
-	_ = binary.Write(writer, binary.BigEndian, srv.Wiped)
-	_ = binary.Write(writer, binary.BigEndian, srv.Queue)
+		_ = writer.WriteByte(byte(srv.MaxPlayers >> 8))
+		_ = writer.WriteByte(byte(srv.MaxPlayers & 0xFF))
 
-	_, _ = writer.WriteString(srv.CustomTags)
-	_ = writer.WriteByte(0)
-}
+		_ = binary.Write(writer, binary.BigEndian, srv.Wiped)
+	} else if version == 2 {
+		_ = binary.Write(writer, binary.BigEndian, srv.Players)
+		_ = binary.Write(writer, binary.BigEndian, srv.MaxPlayers)
+		_ = binary.Write(writer, binary.BigEndian, srv.Wiped)
+		_ = binary.Write(writer, binary.BigEndian, srv.Queue)
 
-func (srv *RustServerInfo) UpdateInfoAsync(sp <-chan struct{}, wg *sync.WaitGroup) {
-	srv.UpdateInfo()
-	<-sp
-	wg.Done()
-}
-
-func (srv *RustServerInfo) UpdateInfo() {
-	data, err := QueryRustServer(srv.Address)
-	if err != nil {
-		log.Printf("QueryRustServer | %s | %s\n", srv.Address, err.Error())
-		return
+		_, _ = writer.WriteString(srv.CustomTags)
+		_ = writer.WriteByte(0)
 	}
+}
 
+func (srv *Model) Update(data *RawModel) {
 	srv.Hostname = data.Hostname
 	srv.Map = data.Map
 
@@ -84,7 +76,7 @@ func (srv *RustServerInfo) UpdateInfo() {
 
 	customTags := make([]string, 0)
 	for _, tag := range data.Tags {
-		for _, v := range cfg.CustomTagsWhitelist {
+		for _, v := range Config.CustomTagsWhitelist {
 			if strings.EqualFold(tag, v) {
 				customTags = append(customTags, tag)
 				break
